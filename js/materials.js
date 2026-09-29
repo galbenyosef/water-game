@@ -5,8 +5,8 @@ import { TANK } from './config.js';
 export const shared = {
   uTime: { value: 0 },
   uWaterInv: { value: new THREE.Matrix4() },
-  uSurfTilt: { value: 0 },
-  uWaterLevel: { value: TANK.water },
+  uSurfN: { value: new THREE.Vector3(0, 1, 0) }, // 水面の法線（上向き）
+  uSurfC: { value: TANK.water },                 // dot(uSurfN, p) がこれより大きい側が空気
   uCausticColor: { value: new THREE.Color(0.75, 0.95, 1.0) },
 };
 
@@ -39,8 +39,8 @@ export function patchMaterial(material, { caustic = 1, sparkle = false } = {}) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = shared.uTime;
     shader.uniforms.uWaterInv = shared.uWaterInv;
-    shader.uniforms.uSurfTilt = shared.uSurfTilt;
-    shader.uniforms.uWaterLevel = shared.uWaterLevel;
+    shader.uniforms.uSurfN = shared.uSurfN;
+    shader.uniforms.uSurfC = shared.uSurfC;
     shader.uniforms.uCausticColor = shared.uCausticColor;
     shader.uniforms.uCausticMul = uCausticMul;
     shader.vertexShader = shader.vertexShader
@@ -58,17 +58,17 @@ export function patchMaterial(material, { caustic = 1, sparkle = false } = {}) {
         varying vec3 vObjPos;
         uniform float uTime;
         uniform mat4 uWaterInv;
-        uniform float uSurfTilt;
-        uniform float uWaterLevel;
+        uniform vec3 uSurfN;
+        uniform float uSurfC;
         uniform vec3 uCausticColor;
         uniform float uCausticMul;
         ${CAUSTIC_GLSL}`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
         {
           vec3 lp = (uWaterInv * vec4(vCWorld, 1.0)).xyz;
-          float surf = uWaterLevel + tan(clamp(uSurfTilt, -0.6, 0.6)) * lp.x;
-          float inW = smoothstep(0.03, -0.1, lp.y - surf) * step(abs(lp.x), 2.62) * step(abs(lp.z), 0.72);
-          float depthK = mix(0.55, 1.0, clamp(lp.y / uWaterLevel, 0.0, 1.0));
+          float dep = uSurfC - dot(uSurfN, lp);
+          float inW = smoothstep(-0.03, 0.1, dep) * step(abs(lp.x), 2.62) * step(-0.1, lp.y) * step(lp.y, ${(TANK.height + 0.1).toFixed(2)}) * step(abs(lp.z), 0.72);
+          float depthK = mix(1.0, 0.55, clamp(dep / ${TANK.height.toFixed(2)}, 0.0, 1.0));
           float cst = causticAt(lp, uTime) + 0.5 * causticAt(lp * 1.7 + vec3(3.1, 1.3, 0.0), uTime * 1.3);
           totalEmissiveRadiance += uCausticColor * cst * uCausticMul * 0.6 * inW * depthK * (0.15 + 0.85 * diffuseColor.rgb);
           ${sparkle ? `

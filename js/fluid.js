@@ -7,7 +7,7 @@ export class Fluid {
     this.x0 = -TANK.halfW;
     this.y0 = 0;
     this.nx = Math.round((TANK.halfW * 2) / this.h);
-    this.ny = Math.ceil(TANK.water / this.h) + 1;
+    this.ny = Math.ceil(TANK.height / this.h); // ひっくり返しても水があるよう、天井まで
     const n = (this.nx + 2) * (this.ny + 2);
     this.u = new Float32Array(n);
     this.v = new Float32Array(n);
@@ -17,7 +17,7 @@ export class Fluid {
     this.div = new Float32Array(n);
     this.curl = new Float32Array(n);
     this.solid = new Uint8Array(n);
-    this.jetForce = 850;
+    this.jetForce = 1000;
     this.damp = 0.9;
     this.markFloor();
   }

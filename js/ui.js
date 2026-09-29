@@ -104,7 +104,7 @@ export class SettingsPanel {
     chips('画質', 'quality', QUALITIES);
     if (matchMedia('(pointer: coarse)').matches) {
       const tilt = chips('スマホの傾きセンサー', 'tilt', { true: 'つかう', false: 'つかわない' });
-      tilt.appendChild(el('div', 'note', 'スマホをかたむけると中の水もかたむきます。ふるとアイテムがまい上がります。'));
+      tilt.appendChild(el('div', 'note', 'スマホをかたむけたり、ひっくり返したりすると、中の重力の向きも変わります（水面と空気の側も入れ替わります）。スマホを動かすと、中のものは慣性で揺れます。'));
     } else {
       body.appendChild(el('div', 'note', 'キーボードの Q / E でケースをかたむけられます。'));
     }

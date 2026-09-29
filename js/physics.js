@@ -9,6 +9,7 @@ const _n = new THREE.Vector3();
 const _p = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 const _qi = new THREE.Quaternion();
+const _axis = new THREE.Vector3();
 const _flow = [0, 0];
 
 export class Physics {
@@ -18,8 +19,12 @@ export class Physics {
     this.items = [];
     this.pegs = [];
     this.baskets = [];
-    this.gravityLocal = new THREE.Vector3(0, -1, 0);
-    this.surfaceTilt = 0; // 水面の傾き（ケースから見た角度）
+    this.gravityLocal = new THREE.Vector3(0, -1, 0); // ケースから見た重力（大きさ 1 が通常）
+    // 水面は「法線 surfN・高さ surfC」の平面。surfN は上向き（重力の逆）で、
+    // dot(surfN, p) > surfC の側が空気。ひっくり返すと空気の側も入れ替わる
+    this.surfN = new THREE.Vector3(0, 1, 0);
+    this.surfC = TANK.water;
+    this.buildVolumeSamples();
     this.visc = { drag: 3.2, damp: 0.9, gravity: 2.4 };
     this.time = 0;
   }
@@ -28,6 +33,7 @@ export class Physics {
     const R = this.R;
     if (this.world) this.world.free();
     this.world = new R.World({ x: 0, y: -this.visc.gravity, z: 0 });
+    this.surfN.set(0, 1, 0); this.surfC = TANK.water;
     this.world.timestep = 1 / 120;
     this.world.integrationParameters.numSolverIterations = 6;
     this.items = [];
@@ -136,15 +142,54 @@ export class Physics {
     for (const it of this.items) { it.hookTimer = 0; it.scored = false; }
   }
 
-  setGravityAngle(angle) {
-    // ケースが angle だけ傾いたとき、ケースから見た重力と水面
-    this.gravityLocal.set(-Math.sin(angle), -Math.cos(angle), 0);
-    this.surfaceTilt = -angle;
-    const g = this.visc.gravity;
-    this.world.gravity = { x: this.gravityLocal.x * g, y: this.gravityLocal.y * g, z: 0 };
+  // 水の量を保つための、水槽の中の標本点
+  buildVolumeSamples() {
+    const pts = [];
+    const nx = 20, ny = 28, nz = 5;
+    for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) for (let k = 0; k < nz; k++) {
+      pts.push(-TANK.halfW + ((i + 0.5) / nx) * TANK.halfW * 2, ((j + 0.5) / ny) * TANK.height, -TANK.halfD + ((k + 0.5) / nz) * TANK.halfD * 2);
+    }
+    this.vol = new Float32Array(pts);
+    this.volH = new Float32Array(pts.length / 3);
+    this.airFrac = 1 - TANK.water / TANK.height;
   }
 
-  surfaceY(x) { return TANK.water + Math.tan(this.surfaceTilt) * x; }
+  // g：ケースから見た重力ベクトル（大きさ 1 が通常の重さ。揺さぶりの慣性も含めてよい）
+  setGravity(g) {
+    this.gravityLocal.copy(g);
+    const k = this.visc.gravity;
+    this.world.gravity = { x: g.x * k, y: g.y * k, z: g.z * k };
+  }
+
+  setGravityAngle(angle) {
+    _v.set(-Math.sin(angle), -Math.cos(angle), 0);
+    this.setGravity(_v);
+  }
+
+  // 水面の向きを重力に少し遅れて追いかけさせ、水の量が変わらない高さを求める
+  updateSurface(dt) {
+    const len = this.gravityLocal.length();
+    if (len > 0.15) {
+      _v.copy(this.gravityLocal).multiplyScalar(-1 / len);
+      // 目標の向きへ回転させる（真逆のときも、正面から見て横へ回るようにする）
+      const dot = THREE.MathUtils.clamp(this.surfN.dot(_v), -1, 1);
+      const ang = Math.acos(dot);
+      if (ang > 1e-4) {
+        _axis.crossVectors(this.surfN, _v);
+        if (_axis.lengthSq() < 1e-8) _axis.set(0, 0, 1);
+        _axis.normalize();
+        this.surfN.applyAxisAngle(_axis, ang * Math.min(1, dt * 5)).normalize();
+      }
+    }
+    const n = this.surfN, V = this.vol, H = this.volH;
+    for (let i = 0; i < H.length; i++) H[i] = n.x * V[i * 3] + n.y * V[i * 3 + 1] + n.z * V[i * 3 + 2];
+    const sorted = Float32Array.from(H).sort();
+    const c = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * (1 - this.airFrac)))];
+    this.surfC += (c - this.surfC) * Math.min(1, dt * 8);
+  }
+
+  // 水面からの深さ（正なら水の中）
+  depth(x, y, z) { return this.surfC - (this.surfN.x * x + this.surfN.y * y + this.surfN.z * z); }
 
   step(dt, fluid) {
     const steps = Math.min(4, Math.max(1, Math.round(dt / (1 / 120))));
@@ -191,11 +236,10 @@ export class Physics {
         const vx = lv.x + (av.y * rz - av.z * ry);
         const vy = lv.y + (av.z * rx - av.x * rz);
         const vz = lv.z + (av.x * ry - av.y * rx);
-        const surf = this.surfaceY(_p.x);
-        if (_p.y > surf) {
+        if (this.depth(_p.x, _p.y, _p.z) < 0) {
           // 水面より上：水の支えがないので本来の重さで落ちる
           const extra = mPer * (gFull - this.visc.gravity) * dt;
-          b.applyImpulseAtPoint({ x: this.gravityLocal.x * extra, y: this.gravityLocal.y * extra, z: 0 }, _p, true);
+          b.applyImpulseAtPoint({ x: this.gravityLocal.x * extra, y: this.gravityLocal.y * extra, z: this.gravityLocal.z * extra }, _p, true);
           continue;
         }
         fluid.sample(_p.x, _p.y, _flow);

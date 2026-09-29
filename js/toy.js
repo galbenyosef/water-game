@@ -143,8 +143,8 @@ export class Toy {
       uDeep: { value: new THREE.Color('#0b4f9c') },
       uAlpha: { value: 0.2 },
       uTime: shared.uTime,
-      uSurfTilt: shared.uSurfTilt,
-      uLevel: shared.uWaterLevel,
+      uSurfN: shared.uSurfN,
+      uSurfC: shared.uSurfC,
     };
     const tintMat = new THREE.ShaderMaterial({
       uniforms: this.waterUniforms,
@@ -158,18 +158,19 @@ export class Toy {
         }`,
       fragmentShader: /* glsl */`
         uniform vec3 uColor; uniform vec3 uDeep; uniform float uAlpha; uniform float uTime;
-        uniform float uSurfTilt; uniform float uLevel;
+        uniform vec3 uSurfN; uniform float uSurfC;
         varying vec3 vLocal;
         void main() {
           vec2 p = vLocal.xy + vec2(0.0, ${(height / 2).toFixed(3)});
-          float surf = uLevel + tan(clamp(uSurfTilt, -0.6, 0.6)) * p.x;
-          float d = surf - p.y;
+          vec3 lp = vec3(p, ${halfD.toFixed(3)});
+          float d = uSurfC - dot(uSurfN, lp);
           if (d < 0.0) discard;
-          float h = clamp(p.y / uLevel, 0.0, 1.0);
+          float h = clamp(1.0 - d / ${height.toFixed(3)}, 0.0, 1.0);
           vec3 col = mix(uDeep, uColor, pow(h, 0.8));
-          float rays = sin((p.x + p.y * 0.38) * 2.6 + uTime * 0.35) * sin((p.x * 0.8 - p.y * 0.22) * 4.3 - uTime * 0.23);
+          vec2 q = vec2(dot(lp.xy, vec2(uSurfN.y, -uSurfN.x)), d);
+          float rays = sin((q.x - q.y * 0.38) * 2.6 + uTime * 0.35) * sin((q.x * 0.8 + q.y * 0.22) * 4.3 - uTime * 0.23);
           rays = pow(max(rays, 0.0), 3.0) * 0.5 * h;
-          float band = exp(-d * 14.0) * 0.55;
+          float band = exp(-d * 14.0) * 0.55 + exp(-d * 90.0) * 0.9;
           col += vec3(0.85, 0.97, 1.0) * (rays + band);
           float a = uAlpha * (1.0 + 0.9 * (1.0 - h)) + rays * 0.12 + band * 0.35;
           gl_FragColor = vec4(col, clamp(a, 0.0, 0.85));
@@ -183,14 +184,14 @@ export class Toy {
     this.group.add(tint);
     this.tint = tint;
 
-    // 水面
+    // 水面：どの向きにもなれる大きな平面を、水槽の内側（6 枚のクリップ面）で切り抜く
     this.surfUniforms = { uJet0: { value: 0 }, uJet1: { value: 0 }, uTime: shared.uTime };
-    const sw = halfW * 2 / Math.cos(0.3);
-    const surfGeo = new THREE.PlaneGeometry(sw, halfD * 2, 96, 6);
+    const surfGeo = new THREE.PlaneGeometry(9.5, 9.5, 120, 120);
     surfGeo.rotateX(-Math.PI / 2);
+    this.clipPlanes = Array.from({ length: 6 }, () => new THREE.Plane());
     this.surfMat = new THREE.MeshPhysicalMaterial({
       color: '#cdefff', roughness: 0.06, metalness: 0.2, transparent: true, opacity: 0.55,
-      side: THREE.DoubleSide, depthWrite: false, clearcoat: 1,
+      side: THREE.DoubleSide, depthWrite: false, clearcoat: 1, clippingPlanes: this.clipPlanes,
     });
     const su = this.surfUniforms;
     const nzx0 = NOZZLES[0].x.toFixed(3), nzx1 = NOZZLES[1].x.toFixed(3);
@@ -201,8 +202,8 @@ export class Toy {
         float wh(vec2 p) {
           float h = 0.018 * sin(p.x * 3.7 + uTime * 1.9) + 0.012 * sin(p.x * 6.1 - uTime * 2.7 + p.y * 4.0)
                   + 0.008 * sin(p.x * 11.0 + uTime * 4.1);
-          h += uJet0 * 0.16 * exp(-pow(p.x - (${nzx0} + 0.9), 2.0) * 2.2) * (0.8 + 0.2 * sin(uTime * 14.0));
-          h += uJet1 * 0.16 * exp(-pow(p.x - (${nzx1} - 0.9), 2.0) * 2.2) * (0.8 + 0.2 * sin(uTime * 13.0));
+          h += uJet0 * 0.16 * exp(-pow(p.x - (${nzx0} + 0.4), 2.0) * 2.2) * (0.8 + 0.2 * sin(uTime * 14.0));
+          h += uJet1 * 0.16 * exp(-pow(p.x - (${nzx1} - 0.4), 2.0) * 2.2) * (0.8 + 0.2 * sin(uTime * 13.0));
           return h;
         }`;
       shader.vertexShader = shader.vertexShader
@@ -219,18 +220,11 @@ export class Toy {
     };
     const surf = new THREE.Mesh(surfGeo, this.surfMat);
     surf.renderOrder = 3;
+    surf.frustumCulled = false;
     this.surfPivot = new THREE.Group();
     this.surfPivot.position.set(0, water, 0);
     this.surfPivot.add(surf);
     this.group.add(this.surfPivot);
-    // 水面を覆う左右の端は壁の中に隠れる。はみ出し防止のクリップは壁の厚みで十分
-
-    // 前面のメニスカス（水面の光る線）
-    const menMat = new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false });
-    const men = new THREE.Mesh(new THREE.PlaneGeometry(sw, 0.035), menMat);
-    men.position.set(0, 0, halfD + 0.001);
-    men.renderOrder = 4;
-    this.surfPivot.add(men);
   }
 
   buildPanels() {
@@ -342,11 +336,23 @@ export class Toy {
     }
   }
 
-  update(jets, press, surfTilt) {
+  update(jets, press, surfN, surfC) {
     this.buttons.forEach((b, i) => { b.position.y = -press[i] * 0.2; });
     this.surfUniforms.uJet0.value = jets[0];
     this.surfUniforms.uJet1.value = jets[1];
-    this.surfPivot.rotation.z = surfTilt;
-    this.surfPivot.position.y = water;
+    // 水面の平面：原点に近い点 n*c に置き、+Y を法線に向ける（ケースが直立なら回転なし）
+    this.surfPivot.quaternion.setFromUnitVectors(_up, surfN);
+    this.surfPivot.position.copy(surfN).multiplyScalar(surfC);
+    // 水槽の内側だけ残すクリップ面（ワールド座標）
+    const m = this.group.matrixWorld;
+    const e = 0.004;
+    const defs = [[1, 0, 0, halfW - e], [-1, 0, 0, halfW - e], [0, 1, 0, -e], [0, -1, 0, height - e], [0, 0, 1, halfD - e], [0, 0, -1, halfD - e]];
+    defs.forEach(([x, y, z, c], i) => {
+      // n·p + c >= 0 が残る側
+      this.clipPlanes[i].set(_n3.set(x, y, z), c).applyMatrix4(m);
+    });
   }
 }
+
+const _up = new THREE.Vector3(0, 1, 0);
+const _n3 = new THREE.Vector3();

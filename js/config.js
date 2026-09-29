@@ -72,9 +72,9 @@ export const WATERS = {
 };
 
 export const VISCOSITY = {
-  light:  { label: 'さらさら', drag: 4.5, damp: 0.45, gravity: 3.4 },
-  normal: { label: 'ふつう', drag: 6.5, damp: 0.8, gravity: 2.8 },
-  thick:  { label: 'とろとろ', drag: 9.0, damp: 1.5, gravity: 1.8 },
+  light:  { label: 'さらさら', drag: 4.5, damp: 0.45, gravity: 4.4 },
+  normal: { label: 'ふつう', drag: 6.5, damp: 0.8, gravity: 3.8 },
+  thick:  { label: 'とろとろ', drag: 9.0, damp: 1.5, gravity: 2.5 },
 };
 
 export const BODY_COLORS = {

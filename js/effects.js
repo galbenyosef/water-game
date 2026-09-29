@@ -58,7 +58,8 @@ export class Bubbles {
     this.vx[i] = vx; this.vy[i] = vy;
   }
 
-  update(dt, fluid, jets, up, surfaceY) {
+  // up：水面の法線（上向き）、depth(x, y, z)：水面からの深さ
+  update(dt, fluid, jets, up, depth) {
     // ジェットからの泡
     for (let k = 0; k < NOZZLES.length; k++) {
       const s = jets[k];
@@ -87,10 +88,11 @@ export class Bubbles {
       const wob = Math.sin(this.life[i] * 9 + this.ph[i]) * 0.25 * (0.3 + this.r[i] * 8);
       this.x[i] += (this.vx[i] + wob) * dt;
       this.y[i] += this.vy[i] * dt;
-      this.z[i] += Math.cos(this.life[i] * 7 + this.ph[i]) * 0.15 * dt;
+      this.z[i] += (Math.cos(this.life[i] * 7 + this.ph[i]) * 0.15 + up.z * rise) * dt;
       this.x[i] = Math.min(Math.max(this.x[i], -TANK.halfW + this.r[i]), TANK.halfW - this.r[i]);
+      this.y[i] = Math.min(Math.max(this.y[i], fluid.floorAt(this.x[i]) + this.r[i]), TANK.height - this.r[i]);
       this.z[i] = Math.min(Math.max(this.z[i], -TANK.halfD + this.r[i]), TANK.halfD - this.r[i]);
-      if (this.y[i] > surfaceY(this.x[i]) - this.r[i] * 0.6 || this.life[i] > 12) {
+      if (depth(this.x[i], this.y[i], this.z[i]) < this.r[i] * 0.6 || this.life[i] > 12) {
         if (this.life[i] <= 12 && this.r[i] > 0.05) pops++;
         const last = --this.count;
         this.x[i] = this.x[last]; this.y[i] = this.y[last]; this.z[i] = this.z[last];
@@ -164,7 +166,7 @@ export class Glitter {
     this.points.renderOrder = 6;
   }
 
-  update(dt, fluid, up, surfaceY) {
+  update(dt, fluid, up, depth) {
     const p = this.pos;
     const t = shared.uTime.value;
     for (let i = 0; i < this.n; i++) {
@@ -174,13 +176,15 @@ export class Glitter {
       const sink = 0.05 + s * 0.06;
       p[ix] += (_flow[0] * 0.9 - up.x * sink + Math.sin(t * 0.7 + s * 40) * 0.05) * dt;
       p[ix + 1] += (_flow[1] * 0.9 - up.y * sink) * dt;
-      p[ix + 2] += Math.sin(t * 0.5 + s * 70) * 0.06 * dt + (Math.hypot(_flow[0], _flow[1]) * Math.sin(p[ix] * 3 + t) * 0.12) * dt;
+      p[ix + 2] += (Math.sin(t * 0.5 + s * 70) * 0.06 - up.z * sink) * dt + (Math.hypot(_flow[0], _flow[1]) * Math.sin(p[ix] * 3 + t) * 0.12) * dt;
       p[ix] = Math.min(Math.max(p[ix], -TANK.halfW + 0.03), TANK.halfW - 0.03);
       p[ix + 2] = Math.min(Math.max(p[ix + 2], -TANK.halfD + 0.03), TANK.halfD - 0.03);
       const floor = fluid.floorAt(p[ix]) + 0.03;
       if (p[ix + 1] < floor) p[ix + 1] = floor;
-      const top = surfaceY(p[ix]) - 0.05;
-      if (p[ix + 1] > top) p[ix + 1] = top;
+      if (p[ix + 1] > TANK.height - 0.03) p[ix + 1] = TANK.height - 0.03;
+      // 水面より上に出たら、水の中へ押し戻す
+      const d = depth(p[ix], p[ix + 1], p[ix + 2]) - 0.05;
+      if (d < 0) { p[ix] += up.x * d; p[ix + 1] += up.y * d; p[ix + 2] += up.z * d; }
     }
     this.geo.attributes.position.needsUpdate = true;
   }

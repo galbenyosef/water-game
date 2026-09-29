@@ -7,7 +7,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import RAPIER from 'rapier';
 import {
-  PALETTES, WATERS, VISCOSITY, BODY_COLORS, PEG_LAYOUTS, BASKET_LAYOUT, SHAPES,
+  PALETTES, WATERS, NOZZLES, VISCOSITY, BODY_COLORS, PEG_LAYOUTS, BASKET_LAYOUT, SHAPES,
   loadSettings, saveSettings, setupKey, loadBest, saveBest,
 } from './config.js';
 import { Fluid } from './fluid.js';
@@ -28,6 +28,7 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.9;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.localClippingEnabled = true; // 水面を水槽の内側で切り抜く
 
 const scene = new THREE.Scene();
 scene.background = makeBackgroundTexture();
@@ -156,7 +157,7 @@ function buildWorld() {
     item.mesh = mesh;
     item.color = color;
   });
-  physics.setGravityAngle(tilt.phys);
+  physics.setGravity(tilt.G);
   physics.settle(fluid);
   $('total').textContent = String(kinds.length);
 }
@@ -340,24 +341,50 @@ window.addEventListener('blur', () => {
 });
 
 // ---------- 傾き（キーボード／センサー） ----------
-const tilt = { key: 0, sensor: 0, vis: 0, phys: 0, sensorOn: false };
+// センサーを使うときは、ケースは画面に固定したまま、ケースから見た重力の向きを端末の向きに合わせる。
+// 端末をひっくり返せば重力も上下逆になり、水面と空気の側も入れ替わる。
+const tilt = {
+  key: 0, vis: 0, sensorOn: false,
+  sensorG: new THREE.Vector3(0, -1, 0),  // 端末の向きから求めた重力（画面座標、大きさ 1）
+  accel: new THREE.Vector3(),            // 端末を動かしたときの加速度（画面座標、m/s²）
+  accSign: 1,                            // 加速度の符号（ブラウザによって逆のことがある）
+  G: new THREE.Vector3(0, -1, 0),        // 実際に使う重力（なめらかにしたもの）
+};
 let lastShake = 0;
+const _g = new THREE.Vector3();
 
+function screenAngle() {
+  const a = (screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0;
+  return THREE.MathUtils.degToRad(a || 0);
+}
+// 端末の座標（x:右, y:上, z:画面の手前）→ いまの画面の座標
+function toScreen(x, y, z, out) {
+  const a = screenAngle(), c = Math.cos(a), s = Math.sin(a);
+  return out.set(x * c - y * s, x * s + y * c, z);
+}
 function onOrientation(e) {
-  if (e.gamma == null) return;
-  const ang = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
-  let g;
-  if (ang === 90) g = e.beta;
-  else if (ang === -90 || ang === 270) g = -e.beta;
-  else g = e.gamma;
-  tilt.sensor = THREE.MathUtils.clamp(THREE.MathUtils.degToRad(g || 0), -0.9, 0.9);
+  if (e.beta == null || e.gamma == null) return;
+  const b = THREE.MathUtils.degToRad(e.beta), c = THREE.MathUtils.degToRad(e.gamma);
+  // 回転 Rz(alpha)·Rx(beta)·Ry(gamma) の逆で、地球の「下」を端末の座標に移したもの
+  toScreen(Math.sin(c) * Math.cos(b), -Math.sin(b), -Math.cos(b) * Math.cos(c), tilt.sensorG);
 }
 function onMotion(e) {
-  const a = e.accelerationIncludingGravity;
-  if (!a || a.x == null) return;
-  const mag = Math.hypot(a.x, a.y, a.z);
-  const now = performance.now();
-  if (Math.abs(mag - 9.8) > 13 && now - lastShake > 900 && game.phase === 'play') { lastShake = now; doShake(0.8); }
+  const ag = e.accelerationIncludingGravity;
+  if (ag && ag.x != null) {
+    // 仕様では静止時に「重力と逆向き」の値になる。逆の値を返すブラウザもあるので、向きの情報と比べて符号を決める
+    const gd = toScreen(ag.x, ag.y, ag.z, _g);
+    const dot = gd.dot(tilt.sensorG);
+    if (Math.abs(dot) > 5) tilt.accSign = dot < 0 ? 1 : -1;
+    const mag = gd.length();
+    const now = performance.now();
+    if (Math.abs(mag - 9.8) > 16 && now - lastShake > 900 && game.phase === 'play') { lastShake = now; doShake(0.6); }
+  }
+  const a = e.acceleration;
+  if (a && a.x != null) {
+    toScreen(a.x, a.y, a.z, _g).multiplyScalar(tilt.accSign);
+    if (_g.length() < 0.6) _g.set(0, 0, 0);   // 手のふるえは無視
+    tilt.accel.lerp(_g, 0.5);
+  }
 }
 async function enableSensors() {
   try {
@@ -383,7 +410,7 @@ async function enableSensors() {
 function stopSensors() {
   window.removeEventListener('deviceorientation', onOrientation);
   window.removeEventListener('devicemotion', onMotion);
-  tilt.sensorOn = false; tilt.sensor = 0;
+  tilt.sensorOn = false; tilt.sensorG.set(0, -1, 0); tilt.accel.set(0, 0, 0);
 }
 
 function doShake(power = 1) {
@@ -441,7 +468,7 @@ const up = new THREE.Vector3();
 const _v = new THREE.Vector3();
 let time = 0;
 let demoTimer = 0;
-const surfaceY = (x) => physics.surfaceY(x);
+const depthAt = (x, y, z) => physics.depth(x, y, z);
 const hintEls = [$('hint-l'), $('hint-r')];
 
 function frame() {
@@ -463,20 +490,33 @@ function frame() {
     }
     updatePumps(dt);
 
-    // 傾き
+    // 傾き・重力
     const target = tilt.sensorOn ? 0 : tilt.key * 0.28;
     tilt.vis += (target - tilt.vis) * Math.min(1, dt * 6);
-    const physTarget = tilt.sensorOn ? THREE.MathUtils.clamp(-tilt.sensor, -0.34, 0.34) : tilt.vis;
-    tilt.phys += (physTarget - tilt.phys) * Math.min(1, dt * 8);
-    physics.setGravityAngle(tilt.phys);
-    up.copy(physics.gravityLocal).negate();
+    if (tilt.sensorOn) {
+      // 端末を動かすと、中のものは慣性で逆向きに押される
+      _g.copy(tilt.accel).multiplyScalar(-1 / 9.8).add(tilt.sensorG);
+      if (_g.length() > 3) _g.setLength(3);
+    } else {
+      _g.set(-Math.sin(tilt.vis), -Math.cos(tilt.vis), 0);
+    }
+    tilt.G.lerp(_g, Math.min(1, dt * 10));
+    physics.setGravity(tilt.G);
+    physics.updateSurface(dt);
+    up.copy(physics.surfN);
     holder.rotation.z = tilt.vis;
     holder.position.y = HOLD_Y + Math.abs(Math.sin(tilt.vis)) * 3.4;
     cam.shake = Math.max(0, cam.shake - dt);
     holder.position.x = Math.sin(time * 60) * cam.shake * 0.12;
     holder.updateMatrixWorld(true);
     shared.uWaterInv.value.copy(toy.group.matrixWorld).invert();
-    shared.uSurfTilt.value = -tilt.phys;
+    shared.uSurfN.value.copy(physics.surfN);
+    shared.uSurfC.value = physics.surfC;
+    // 吹き出し口が空気の中にあるときは、水を噴き出せない
+    for (let k = 0; k < 2; k++) {
+      const nz = NOZZLES[k];
+      jets[k] *= THREE.MathUtils.smoothstep(physics.depth(nz.x, nz.y + 0.1, 0), -0.05, 0.35);
+    }
 
     fluid.step(dt, jets);
     physics.step(dt, fluid);
@@ -509,11 +549,11 @@ function frame() {
       }
     }
 
-    const pops = bubbles.update(dt, fluid, jets, up, surfaceY);
+    const pops = bubbles.update(dt, fluid, jets, up, depthAt);
     if (pops > 0 && Math.random() < 0.5) sfx.bubble();
-    if (glitter.points.visible) glitter.update(dt, fluid, up, surfaceY);
+    if (glitter.points.visible) glitter.update(dt, fluid, up, depthAt);
     sparks.update(dt);
-    toy.update(jets, pumps.map(p => p.vis), -tilt.phys);
+    toy.update(jets, pumps.map(p => p.vis), physics.surfN, physics.surfC);
     sfx.setFlow(jets[0] + jets[1]);
 
     if (game.running) {
@@ -570,4 +610,4 @@ async function boot() {
 boot();
 
 // デバッグ用
-window.__wg = { get physics() { return physics; }, fluid, jets, pumps, game, setHeld, doShake, camera, renderer, toy, scene, bubbles, glitter };
+window.__wg = { get physics() { return physics; }, fluid, jets, pumps, game, setHeld, doShake, camera, renderer, toy, scene, bubbles, glitter, tilt };
